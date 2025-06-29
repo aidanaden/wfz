@@ -1,137 +1,158 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-const zigimg = @import("zigimg");
-const Pattern = @import("pattern.zig").Pattern;
-const SourcePattern = Pattern(u32);
-
-const OverlapModel = struct {
-    const Options = struct {
-        N: u32,
-        periodic_input: bool,
-        periodic_output: bool,
-        symmetry: u32,
-        ground: u32,
-        const DEFAULTS: Options = .{
-            .N = 2,
-            .periodic_input = true,
-            .periodic_output = false,
-            .symmetry = 8,
-            .ground = 0,
-        };
-    };
-
-    /// Output image width
-    width: u32,
-    /// Output image height
-    height: u32,
-    /// Pattern size (NxN)
-    N: u32,
-    periodic: bool,
-    symmetry: u32,
-    patterns: []SourcePattern,
-
-    /// Id of the specific pattern to use as the bottom of the
-    /// generation, a value of 0 means that this is unset
-    ground: u32,
-
-    const Self = @This();
-    fn init(
-        width: u32,
-        height: u32,
-        name: []const u8,
-        options: ?Options,
-    ) Self {
-        const _options = options orelse Options.DEFAULTS;
-        return Self{
-            .width = width,
-            .height = height,
-            .name = name,
-            .N = _options.N,
-            .periodic = _options.periodic_output,
-            .symmetry = _options.symmetry,
-            .ground = _options.ground,
-        };
-    }
+/// tracy imports
+pub const tracy = @import("tracy");
+pub const tracy_impl = @import("tracy_impl");
+pub const tracy_options: tracy.Options = .{
+    .default_callstack_depth = 8,
+    .verbose = true,
 };
 
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const BaseModel = @import("./model/Base.zig");
+const OverlapModel = @import("./model/overlap/OverlapModel.zig");
+const ImageProcessor = @import("ImageProcessor.zig");
+
+const SourcePattern = @import("./model/overlap/Pattern.zig").Pattern(u32);
+const PatternId = SourcePattern.BaseEncoder.EncodedId;
+
+const TileSet = @import("./model/tile/TileSet.zig");
+const TilingModel = @import("./model/tile/TilingModel.zig");
+
 pub fn main() !void {
+    const zone = tracy.Zone.begin(.{
+        .name = "Main zone",
+        .src = @src(),
+        .color = .tomato,
+    });
+    defer zone.end();
+
+    // var tracy_allocator: tracy.Allocator = .{ .parent = std.heap.page_allocator };
+
     // Init allocator
+    // var debug = std.heap.DebugAllocator(.{ .verbose_log = true }).init;
+    // defer {
+    //     const leaks = debug.deinit();
+    //     std.log.debug("leaks: {any}\n", .{leaks});
+    // }
+    // const debug_allocator = debug.allocator();
+    // var arena = std.heap.ArenaAllocator.init(debug_allocator);
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-
     const allocator = arena.allocator();
 
-    const img_path = "./src/assets/City.png";
-    var image = try zigimg.Image.fromFilePath(allocator, img_path);
-    defer image.deinit();
+    const name = "castle";
+    // const name = "bomberman-stage-3-08";
+    // const name = "3Bricks";
+    // const name = "city";
+    const img_path = try std.fmt.allocPrintZ(allocator, "./src/assets/samples/{s}.png", .{name});
+    const output_fname = try std.fmt.allocPrint(allocator, "{s}_output.png", .{name});
 
-    const pixels = image.pixels.rgba32;
-    // TODO: dynamically set this based on return type of `image.pixels`
-    const RgbType = zigimg.color.Rgba32;
+    // Set test parameters
+    const params = BaseModel.InitParams{
+        .N = 3,
+        .periodic = true,
+        .output_w = 256, // 340,
+        .output_h = 256, // 512,
+        .symmetry = 8,
+        .ground = false,
+        .img_path = img_path,
+        .output_fname = output_fname,
+        .name = name,
+    };
+    // load asset(s)
+    //
+    // build relation probabilities
+    //
+    // generate
 
-    // Mapping of color_id -> rgb value
-    var id_to_pixel = std.AutoArrayHashMap(u32, RgbType).init(allocator);
-    defer id_to_pixel.deinit();
+    // tracy.message(.{
+    //     .text = "overlapInit",
+    //     .color = .light_green,
+    // });
 
-    // Mapping of rgb value -> color_id
-    var pixel_to_id = std.AutoArrayHashMap(RgbType, u32).init(allocator);
-    defer pixel_to_id.deinit();
+    var tiling = try TilingModel.init(&params, allocator);
+    defer tiling.deinit();
 
-    // Initial starting color id value
-    var color_id: u32 = 1;
+    var prng = std.Random.DefaultPrng.init(@as(u64, @intCast(std.time.nanoTimestamp())));
+    var random = prng.random();
 
-    // All pixels of the source image encoded in color_id
-    var pixel_ids = try std.ArrayList(u32).initCapacity(allocator, pixels.len);
-    defer pixel_ids.deinit();
-
-    // Encode every pixel into a color id
-    for (pixels) |pixel| {
-        const id = pixel_to_id.get(pixel);
-        if (id == null) {
-            try pixel_to_id.put(pixel, color_id);
-            try id_to_pixel.put(color_id, pixel);
-            try pixel_ids.append(color_id);
-            color_id += 1;
-        } else {
-            try pixel_ids.append(id.?);
-        }
+    var collapsed: BaseModel.Collapsed = .failed;
+    while (collapsed != .success) {
+        tiling.clear();
+        random = prng.random();
+        collapsed = try generate(&tiling, random);
     }
 
-    const num_colors: u32 = @intCast(pixel_to_id.keys().len);
-    const pattern_encoder = SourcePattern.BaseEncoder.init(3, num_colors);
-    var patterns = std.ArrayList(SourcePattern).init(allocator);
-    defer {
-        for (patterns.items) |pattern| {
-            pattern.deinit();
+    const output_pixel_idxs = try tiling.render_output();
+    defer allocator.free(output_pixel_idxs);
+
+    var output_img = try tiling.img_processor.generate(
+        params.output_w,
+        params.output_h,
+        output_pixel_idxs,
+    );
+    defer output_img.deinit();
+
+    std.debug.print("image pixels: {any}\n", .{output_img.imageByteSize()});
+    const output_fpath = try std.fmt.allocPrintZ(allocator, "./src/assets/tiling/{s}", .{params.output_fname});
+    try output_img.writeToFilePath(output_fpath, .{ .png = .{} });
+
+    // var overlap = try OverlapModel.init(
+    //     &params,
+    //     allocator,
+    // );
+    // var collapsed: OverlapModel.Collapsed = .failed;
+    // while (collapsed != .success) {
+    //     overlap.clear();
+    //     std.debug.print("Unique patterns found: {}\n", .{overlap.pattern_weights.keys().len});
+    //     random = prng.random();
+    //     collapsed = try generate(&overlap, random);
+    // }
+    //
+    // const output_pixel_idxs = try overlap.render_output();
+    // defer allocator.free(output_pixel_idxs);
+    //
+    // var output_img = try overlap.img_processor.generate(
+    //     params.output_w,
+    //     params.output_h,
+    //     output_pixel_idxs,
+    // );
+    // defer output_img.deinit();
+    //
+    // std.debug.print("image pixels: {any}\n", .{output_img.imageByteSize()});
+    // const output_fpath = try std.fmt.allocPrintZ(allocator, "./src/assets/samples/{s}", .{params.output_fname});
+    // try output_img.writeToFilePath(output_fpath, .{ .png = .{} });
+}
+
+// This function uses compile-time duck typing. It will compile for any `model`
+// that has a `base: BaseModel` field and a `propagate()` method.
+pub fn generate(model: anytype, random: std.Random) !BaseModel.Collapsed {
+    std.debug.print("generate\n", .{});
+
+    // if (model.ground_patterns.keys().len > 0) {
+    //     try model.collapse_ground();
+    // }
+    try model.propagate();
+
+    var i: usize = 0;
+    var collapsed: BaseModel.Collapsed = .failed;
+    while (collapsed == .failed) {
+        std.debug.print("iterate {}\n", .{i});
+
+        collapsed = try model.collapse(random);
+        try model.propagate();
+
+        if (collapsed == .success) {
+            return .success;
         }
-        patterns.deinit();
+        i += 1;
     }
 
-    // Generate patterns based on NxN tiling window
-    for (0..image.height) |y| {
-        for (0..image.width) |x| {
-            const pattern = try SourcePattern.init(
-                x,
-                y,
-                3,
-                pixel_ids.items,
-                image.height,
-                image.width,
-                allocator,
-            );
-            const patternId = pattern_encoder.encode(pattern.values.items);
-            std.debug.print("pattern ({}, {}): id: {} \n", .{ x, y, patternId });
-            for (pattern.values.items, 0..) |v, i| {
-                const pixel = id_to_pixel.get(v);
-                if (pixel == null) {
-                    std.debug.print("i: {}, pixel_id: {}: pixel_value: UNKNOWN\n", .{ i, v });
-                } else {
-                    std.debug.print("i: {}, pixel_id: {}: pixel_value: {}\n", .{ i, v, pixel.? });
-                }
-            }
-            try patterns.append(pattern);
-        }
-    }
+    std.debug.print("collapsed: {}\n", .{collapsed});
+    return collapsed;
+}
 
-    std.debug.print("num_colors: {}, width: {}, height: {}, pattern count: {}\n", .{ num_colors, image.width, image.height, patterns.items.len });
+test {
+    _ = @import("./model/tile/TileSet.zig");
 }

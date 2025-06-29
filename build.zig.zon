@@ -40,6 +40,10 @@
             .url = "git+https://github.com/zigimg/zigimg.git#74caab5edd7c5f1d2f7d87e5717435ce0f0affa1",
             .hash = "zigimg-0.1.0-8_eo2nWlEgCddu8EGLOM_RkYshx3sC8tWv-yYA4-htS6",
         },
+        .tracy = .{
+            .url = "git+https://github.com/Games-by-Mason/tracy_zig.git#0cad4646be2791982f692a7a47716ec92b62eb2e",
+            .hash = "tracy-0.0.0-R7l8BdlCAQBFp6uysnan3Alaxap65HBF1mzGdabdKe8z",
+        },
     },
     .paths = .{
         "build.zig",

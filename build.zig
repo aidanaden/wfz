@@ -1,12 +1,26 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    // Allow the user to enable or disable Tracy support with a build flag
+    const tracy_enabled = b.option(
+        bool,
+        "tracy",
+        "Build with Tracy support.",
+    ) orelse true;
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const zigimg_dep = b.dependency("zigimg", .{
         .target = target,
         .optimize = optimize,
+    });
+
+    // Get the Tracy dependency
+    const tracy_dep = b.dependency("tracy", .{
+        .target = target,
+        .optimize = optimize,
+        // ...
     });
 
     const exe_mod = b.createModule(.{
@@ -19,6 +33,10 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     exe.root_module.addImport("zigimg", zigimg_dep.module("zigimg"));
+
+    exe.root_module.addImport("tracy", tracy_dep.module("tracy"));
+    // The user asked to enable Tracy, use the real implementation otherwise use dummy implementation
+    exe.root_module.addImport("tracy_impl", tracy_dep.module(if (tracy_enabled) "tracy_impl_enabled" else "tracy_impl_disabled"));
 
     // Install
     b.installArtifact(exe);
